@@ -1,7 +1,7 @@
 [Unit]
 Description=Clear Chromium locks on boot (prevents stuck restore session)
 After=network.target graphical.target
-Before=chromium.service   # If you have a chromium kiosk service
+Before=chromium.service
 
 [Service]
 Type=oneshot
@@ -9,8 +9,9 @@ ExecStart=/home/haui/fpos_mqtt_ha/chromium_hostname_reset.sh
 User=root
 RemainAfterExit=yes
 
-# Optional: Add some delay if Chromium starts too early
-# ExecStartPre=/bin/sleep 3
+# These two lines make logs visible in journalctl
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target graphical.target
