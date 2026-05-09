@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Display control Python script at startup
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/haui/fpos_mqtt_ha/fpos_mqtt_ha.py
+WorkingDirectory=/home/haui/fpos_mqtt_ha
+Restart=always
+User=haui
+
+[Install]
+WantedBy=multi-user.target
