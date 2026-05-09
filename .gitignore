@@ -32,6 +32,25 @@ MANIFEST
 *.manifest
 *.spec
 
+.Xauthority
+.bash_history
+.bash_logout
+.bashrc
+.config/
+.fehbg
+.fontconfig/
+.fonts/
+.lesshst
+.local/
+.pki/
+.profile
+.ssh/
+.sudo_as_admin_successful
+.viminfo
+.wget-hsts
+.xsession-errors
+.xsession-errors.old
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
