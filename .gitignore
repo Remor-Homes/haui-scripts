@@ -50,6 +50,7 @@ MANIFEST
 .wget-hsts
 .xsession-errors
 .xsession-errors.old
+scripts
 
 # Installer logs
 pip-log.txt
