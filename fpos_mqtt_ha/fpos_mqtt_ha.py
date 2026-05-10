@@ -13,14 +13,24 @@ import socket
 
 # Load environment variables
 load_dotenv()
-
 BROKER = os.getenv("BROKER_IP")
 PORT = int(os.getenv("BROKER_PORT"))
 USERNAME = os.getenv("BROKER_USERNAME")
 PASSWORD = os.getenv("BROKER_PASSWORD")
 CA_CERT = "/tmp-remorh/ca.crt"
 DISPLAY_NAME = os.getenv("DISPLAY_NAME", "10-0045")
+
+# Brightness persistence for reboot recovery
+SAVED_BRIGHTNESS = int(os.getenv("SAVED_BRIGHTNESS", "100"))
+print(f"Loaded SAVED_BRIGHTNESS from .env: {SAVED_BRIGHTNESS}%")
+
 DIMMING_PERCENT = int(os.getenv("DIMMING_PERCENT", "20"))
+
+def save_brightness_to_env(brightness):
+    """Save user-set brightness to .env so it survives reboot"""
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    set_key(env_path, 'SAVED_BRIGHTNESS', str(int(brightness)))
+    print(f"Saved brightness {int(brightness)}% to .env for reboot recovery")
 
 # Dynamically find the touch device event number
 def find_touch_device():
@@ -66,6 +76,10 @@ TIMEOUT_SECONDS = int(os.getenv("LAST_TIMEOUT_SET", os.getenv("TIMEOUT_SECONDS",
 DIMMING_TO_OFF_SECONDS = int(os.getenv("DIMMING_TO_OFF_SECONDS", "30"))
 DIMMING_PERCENT = int(os.getenv("DIMMING_PERCENT", "20"))
 
+# === UNDERVOLTAGE COUNT GLOBALS ===
+undervoltage_count = 0
+previous_undervoltage_now = False
+
 # MQTT topics
 HA_DIMMING_PERCENT_DISCOVERY_PREFIX = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_dimming_percent/config"
 HA_DIMMING_PERCENT_STATE_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_dimming_percent/state"
@@ -88,15 +102,14 @@ HA_TIMEOUT_NUMBER_COMMAND_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}
 HA_UNDERVOLTAGE_DISCOVERY_PREFIX = f"homeassistant/sensor/{DEVICE_NAME}/{HA_NAME}_undervoltage/config"
 HA_UNDERVOLTAGE_STATE_TOPIC = f"homeassistant/sensor/{DEVICE_NAME}/{HA_NAME}_undervoltage/state"
 
-# New: Dedicated Backlight Level number entity
 HA_BACKLIGHT_LEVEL_DISCOVERY_PREFIX = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_backlight_level/config"
 HA_BACKLIGHT_LEVEL_STATE_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_backlight_level/state"
 HA_BACKLIGHT_LEVEL_COMMAND_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_backlight_level/set"
 
-# State variables
+# State variables - restored from .env
 current_state = "OFF"
-current_brightness = 0
-last_brightness = 100
+current_brightness = SAVED_BRIGHTNESS
+last_brightness = SAVED_BRIGHTNESS
 last_activity = 0
 
 def get_backlight_brightness_in_percent():
@@ -125,18 +138,43 @@ def set_backlight_brightness_in_percent(value):
     except Exception as e:
         print(f"Error setting brightness: {e}")
 
+def get_and_update_undervoltage_count():
+    global undervoltage_count, previous_undervoltage_now
+    try:
+        result = subprocess.check_output(["vcgencmd", "get_throttled"]).decode("utf-8").strip()
+        hex_val = result.split('=')[1]
+        val = int(hex_val, 16)
+        current_undervoltage_now = bool(val & 0x1)
+
+        if current_undervoltage_now and not previous_undervoltage_now:
+            undervoltage_count += 1
+            print(f"Undervoltage event detected! New count: {undervoltage_count}")
+
+        previous_undervoltage_now = current_undervoltage_now
+        return str(undervoltage_count)
+    except Exception as e:
+        print(f"Error reading undervoltage: {e}")
+        return str(undervoltage_count)
+
 # MQTT callbacks
 def on_connect(client, userdata, flags, rc, properties=None):
     global last_activity, mqtt_connected
     if rc == 0:
         mqtt_connected = True
         print(f"Connected with result code {rc}")
-
-        # Publish retained states FIRST
         print("Publishing initial retained states...")
+
         client.publish(HA_TIMEOUT_NUMBER_STATE_TOPIC, str(TIMEOUT_SECONDS), retain=True)
         client.publish(HA_DIMMING_PERCENT_STATE_TOPIC, str(DIMMING_PERCENT), retain=True)
         client.publish(HA_DIMMING_TIMEOUT_STATE_TOPIC, str(DIMMING_TO_OFF_SECONDS), retain=True)
+
+        # Restore saved brightness
+        print(f"Restoring SAVED_BRIGHTNESS: {SAVED_BRIGHTNESS}%")
+        set_backlight_brightness_in_percent(SAVED_BRIGHTNESS)
+        global current_brightness, current_state, last_brightness
+        current_brightness = SAVED_BRIGHTNESS
+        current_state = "ON" if SAVED_BRIGHTNESS > 0 else "OFF"
+        last_brightness = SAVED_BRIGHTNESS
 
         # Publish undervoltage state immediately
         undervoltage = get_undervoltage_status()
@@ -146,8 +184,8 @@ def on_connect(client, userdata, flags, rc, properties=None):
         current_level = get_backlight_brightness_in_percent()
         client.publish(HA_BACKLIGHT_LEVEL_STATE_TOPIC, str(current_level), retain=True)
 
-        # Publish discovery
         publish_ha_light_discovery()
+        publish_ha_light_state()
 
         # Subscribe
         client.subscribe(HA_LIGHT_COMMAND_TOPIC)
@@ -207,7 +245,7 @@ def set_backlight_level_from_ha(level):
     """Called when user changes backlight level from HA"""
     level = max(0, min(100, int(level)))
     set_backlight_brightness_in_percent(level)
-    global current_brightness, current_state
+    global current_brightness, current_state, last_brightness
     current_brightness = level
     current_state = "ON" if level > 0 else "OFF"
     publish_ha_light_state()
@@ -260,6 +298,7 @@ def process_command(command):
 
     if current_state == "ON" or level > 2:
         last_activity = time.time()
+        save_brightness_to_env(level)
 
     publish_ha_light_state()
 
@@ -442,6 +481,10 @@ last_mqtt_attempt = 0
 MQTT_RECONNECT_INTERVAL = 30
 last_backlight_publish = 0
 
+# === NEW: Undervoltage periodic monitoring ===
+last_undervoltage_check = 0
+last_undervoltage_status = "0"
+
 try:
     while True:
         now = time.time()
@@ -469,6 +512,9 @@ try:
         if current_level != current_brightness:
             print(f"External brightness change: {current_level}%")
             current_brightness = current_level
+            if current_level >= 3:
+                last_brightness = current_level
+                save_brightness_to_env(current_level)
             if current_level is None:
                 current_level = 0
             new_state = "ON" if current_level > 0 else "OFF"
@@ -490,6 +536,7 @@ try:
                 publish_ha_light_state()
                 dim_start_time = now
                 current_state = "DIMMED"
+                publish_ha_light_state()
 
         # Dimmed → off logic (never turn off if timeout is set to max 600)
         if (current_state == "DIMMED" and dim_start_time is not None
