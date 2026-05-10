@@ -20,7 +20,7 @@ PASSWORD = os.getenv("BROKER_PASSWORD")
 CA_CERT = "/tmp-remorh/ca.crt"
 DISPLAY_NAME = os.getenv("DISPLAY_NAME", "10-0045")
 
-# === NEW: Brightness persistence for reboot recovery ===
+# Brightness persistence for reboot recovery
 SAVED_BRIGHTNESS = int(os.getenv("SAVED_BRIGHTNESS", "100"))
 print(f"Loaded SAVED_BRIGHTNESS from .env: {SAVED_BRIGHTNESS}%")
 
@@ -76,27 +76,32 @@ TIMEOUT_SECONDS = int(os.getenv("LAST_TIMEOUT_SET", os.getenv("TIMEOUT_SECONDS",
 DIMMING_TO_OFF_SECONDS = int(os.getenv("DIMMING_TO_OFF_SECONDS", "30"))
 DIMMING_PERCENT = int(os.getenv("DIMMING_PERCENT", "20"))
 
+# === UNDERVOLTAGE COUNT GLOBALS ===
+undervoltage_count = 0
+previous_undervoltage_now = False
+
 # MQTT topics
 HA_DIMMING_PERCENT_DISCOVERY_PREFIX = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_dimming_percent/config"
 HA_DIMMING_PERCENT_STATE_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_dimming_percent/state"
 HA_DIMMING_PERCENT_COMMAND_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_dimming_percent/set"
+
 HA_DIMMING_TIMEOUT_DISCOVERY_PREFIX = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_dimming_timeout/config"
 HA_DIMMING_TIMEOUT_STATE_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_dimming_timeout/state"
 HA_DIMMING_TIMEOUT_COMMAND_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_dimming_timeout/set"
+
 HA_LIGHT_DISCOVERY_PREFIX = f"homeassistant/light/{DEVICE_NAME}/{HA_NAME}/config"
 HA_LIGHT_STATE_TOPIC = f"homeassistant/light/{DEVICE_NAME}/{HA_NAME}/state"
 HA_LIGHT_BRIGHTNESS_STATE_TOPIC = f"homeassistant/light/{DEVICE_NAME}/{HA_NAME}/brightness"
 HA_LIGHT_BRIGHTNESS_COMMAND_TOPIC = f"homeassistant/light/{DEVICE_NAME}/{HA_NAME}/brightness/set"
 HA_LIGHT_COMMAND_TOPIC = f"homeassistant/light/{DEVICE_NAME}/{HA_NAME}/set"
+
 HA_TIMEOUT_NUMBER_DISCOVERY_PREFIX = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_timeout/config"
 HA_TIMEOUT_NUMBER_STATE_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_timeout/state"
 HA_TIMEOUT_NUMBER_COMMAND_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_timeout/set"
 
-# === FIXED: Undervoltage now uses binary_sensor (correct platform) ===
-HA_UNDERVOLTAGE_DISCOVERY_PREFIX = f"homeassistant/binary_sensor/{DEVICE_NAME}/{HA_NAME}_undervoltage/config"
-HA_UNDERVOLTAGE_STATE_TOPIC = f"homeassistant/binary_sensor/{DEVICE_NAME}/{HA_NAME}_undervoltage/state"
+HA_UNDERVOLTAGE_DISCOVERY_PREFIX = f"homeassistant/sensor/{DEVICE_NAME}/{HA_NAME}_undervoltage/config"
+HA_UNDERVOLTAGE_STATE_TOPIC = f"homeassistant/sensor/{DEVICE_NAME}/{HA_NAME}_undervoltage/state"
 
-# New: Dedicated Backlight Level number entity
 HA_BACKLIGHT_LEVEL_DISCOVERY_PREFIX = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_backlight_level/config"
 HA_BACKLIGHT_LEVEL_STATE_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_backlight_level/state"
 HA_BACKLIGHT_LEVEL_COMMAND_TOPIC = f"homeassistant/number/{DEVICE_NAME}/{HA_NAME}_backlight_level/set"
@@ -112,8 +117,7 @@ def get_backlight_brightness_in_percent():
     try:
         with open(path, "r") as f:
             raw_brightness = int(f.read().strip())
-            percent_brightness = correlate_percent(raw=raw_brightness)
-            return percent_brightness
+            return correlate_percent(raw=raw_brightness)
     except Exception as e:
         print(f"Error reading brightness: {e}")
         return 0
@@ -133,35 +137,47 @@ def set_backlight_brightness_in_percent(value):
     except Exception as e:
         print(f"Error setting brightness: {e}")
 
+def get_and_update_undervoltage_count():
+    global undervoltage_count, previous_undervoltage_now
+    try:
+        result = subprocess.check_output(["vcgencmd", "get_throttled"]).decode("utf-8").strip()
+        hex_val = result.split('=')[1]
+        val = int(hex_val, 16)
+        current_undervoltage_now = bool(val & 0x1)
+
+        if current_undervoltage_now and not previous_undervoltage_now:
+            undervoltage_count += 1
+            print(f"Undervoltage event detected! New count: {undervoltage_count}")
+
+        previous_undervoltage_now = current_undervoltage_now
+        return str(undervoltage_count)
+    except Exception as e:
+        print(f"Error reading undervoltage: {e}")
+        return str(undervoltage_count)
+
 # MQTT callbacks
 def on_connect(client, userdata, flags, rc, properties=None):
     global last_activity, mqtt_connected
     if rc == 0:
         mqtt_connected = True
         print(f"Connected with result code {rc}")
-        # Publish retained states FIRST
         print("Publishing initial retained states...")
+
         client.publish(HA_TIMEOUT_NUMBER_STATE_TOPIC, str(TIMEOUT_SECONDS), retain=True)
         client.publish(HA_DIMMING_PERCENT_STATE_TOPIC, str(DIMMING_PERCENT), retain=True)
         client.publish(HA_DIMMING_TIMEOUT_STATE_TOPIC, str(DIMMING_TO_OFF_SECONDS), retain=True)
-        # Publish undervoltage state immediately
-        undervoltage = get_undervoltage_status()
-        client.publish(HA_UNDERVOLTAGE_STATE_TOPIC, undervoltage, retain=True)
-        # Publish current backlight level immediately
-        current_level = get_backlight_brightness_in_percent()
-        client.publish(HA_BACKLIGHT_LEVEL_STATE_TOPIC, str(current_level), retain=True)
 
-        # === NEW: Restore saved brightness after reboot ===
-        print("Restoring SAVED_BRIGHTNESS after startup...")
+        # Restore saved brightness
+        print(f"Restoring SAVED_BRIGHTNESS: {SAVED_BRIGHTNESS}%")
         set_backlight_brightness_in_percent(SAVED_BRIGHTNESS)
         global current_brightness, current_state, last_brightness
         current_brightness = SAVED_BRIGHTNESS
         current_state = "ON" if SAVED_BRIGHTNESS > 0 else "OFF"
         last_brightness = SAVED_BRIGHTNESS
+
+        publish_ha_light_discovery()
         publish_ha_light_state()
 
-        # Publish discovery
-        publish_ha_light_discovery()
         # Subscribe
         client.subscribe(HA_LIGHT_COMMAND_TOPIC)
         client.subscribe(HA_LIGHT_BRIGHTNESS_COMMAND_TOPIC)
@@ -171,7 +187,7 @@ def on_connect(client, userdata, flags, rc, properties=None):
         client.subscribe(HA_BACKLIGHT_LEVEL_COMMAND_TOPIC)
     else:
         mqtt_connected = False
-        print(f"Connection failed with code {rc}: {mqtt.error_string(rc)}")
+        print(f"Connection failed with code {rc}")
 
 def on_disconnect(client, userdata, rc, properties=None):
     print(f"Disconnected with result code {rc}")
@@ -186,38 +202,29 @@ def on_message(client, userdata, msg):
     try:
         if topic == HA_LIGHT_BRIGHTNESS_COMMAND_TOPIC:
             brightness = int(payload_str)
-            print(f"Received brightness command: {brightness}%")
             process_command({"brightness": brightness})
         elif topic == HA_LIGHT_COMMAND_TOPIC:
             command = json.loads(payload_str)
             process_command(command)
         elif topic == HA_TIMEOUT_NUMBER_COMMAND_TOPIC:
-            timeout_val = int(float(payload_str))
-            set_timeout_seconds(timeout_val)
+            set_timeout_seconds(int(float(payload_str)))
         elif topic == HA_DIMMING_TIMEOUT_COMMAND_TOPIC:
-            dimming_val = int(float(payload_str))
-            set_dimming_timeout_seconds(dimming_val)
+            set_dimming_timeout_seconds(int(float(payload_str)))
         elif topic == HA_DIMMING_PERCENT_COMMAND_TOPIC:
-            percent_val = int(float(payload_str))
-            set_dimming_percent(percent_val)
+            set_dimming_percent(int(float(payload_str)))
         elif topic == HA_BACKLIGHT_LEVEL_COMMAND_TOPIC:
-            level = int(float(payload_str))
-            set_backlight_level_from_ha(level)
+            set_backlight_level_from_ha(int(float(payload_str)))
     except Exception as e:
-        print(f"Error processing message on {topic}: {e} (payload: {payload_str})")
+        print(f"Error processing message on {topic}: {e}")
 
-# Update functions
 def set_dimming_percent(new_percent):
     global DIMMING_PERCENT
     DIMMING_PERCENT = max(1, min(100, int(new_percent)))
-    env_path = os.path.join(os.path.dirname(__file__), '.env')
-    set_key(env_path, 'DIMMING_PERCENT', str(DIMMING_PERCENT))
+    set_key(os.path.join(os.path.dirname(__file__), '.env'), 'DIMMING_PERCENT', str(DIMMING_PERCENT))
     client.publish(HA_DIMMING_PERCENT_STATE_TOPIC, str(DIMMING_PERCENT), retain=True)
-    print(f"Dimming percent updated to {DIMMING_PERCENT}%")
     publish_ha_light_state()
 
 def set_backlight_level_from_ha(level):
-    """Called when user changes backlight level from HA"""
     level = max(0, min(100, int(level)))
     set_backlight_brightness_in_percent(level)
     global current_brightness, current_state, last_brightness
@@ -225,26 +232,21 @@ def set_backlight_level_from_ha(level):
     current_state = "ON" if level > 0 else "OFF"
     if level >= 3:
         last_brightness = level
-        save_brightness_to_env(level)   # persist user choice
+        save_brightness_to_env(level)
     publish_ha_light_state()
-    print(f"Backlight level set from HA to {level}%")
 
 def set_dimming_timeout_seconds(new_timeout):
     global DIMMING_TO_OFF_SECONDS
     DIMMING_TO_OFF_SECONDS = max(1, min(600, int(new_timeout)))
-    env_path = os.path.join(os.path.dirname(__file__), '.env')
-    set_key(env_path, 'DIMMING_TO_OFF_SECONDS', str(DIMMING_TO_OFF_SECONDS))
+    set_key(os.path.join(os.path.dirname(__file__), '.env'), 'DIMMING_TO_OFF_SECONDS', str(DIMMING_TO_OFF_SECONDS))
     client.publish(HA_DIMMING_TIMEOUT_STATE_TOPIC, str(DIMMING_TO_OFF_SECONDS), retain=True)
-    print(f"Dimming timeout updated to {DIMMING_TO_OFF_SECONDS}s")
     publish_ha_light_state()
 
 def set_timeout_seconds(new_timeout):
     global TIMEOUT_SECONDS
     TIMEOUT_SECONDS = max(10, min(3600, int(new_timeout)))
-    env_path = os.path.join(os.path.dirname(__file__), '.env')
-    set_key(env_path, 'LAST_TIMEOUT_SET', str(TIMEOUT_SECONDS))
+    set_key(os.path.join(os.path.dirname(__file__), '.env'), 'LAST_TIMEOUT_SET', str(TIMEOUT_SECONDS))
     client.publish(HA_TIMEOUT_NUMBER_STATE_TOPIC, str(TIMEOUT_SECONDS), retain=True)
-    print(f"Timeout updated to {TIMEOUT_SECONDS}s")
     publish_ha_light_state()
 
 def process_command(command):
@@ -285,7 +287,7 @@ def process_command(command):
 # Discovery
 def publish_ha_light_discovery():
     # Dimming percent
-    dimming_percent_config = {
+    client.publish(HA_DIMMING_PERCENT_DISCOVERY_PREFIX, json.dumps({
         "name": "HAUI Dimming Percent",
         "unique_id": f"{HA_NAME}_dimming_percent",
         "device": {"identifiers": [DEVICE_NAME], "name": HA_NAME, "manufacturer": "Custom", "model": "Display controller", "sw_version": "1.0"},
@@ -295,12 +297,10 @@ def publish_ha_light_discovery():
         "icon": "mdi:brightness-6",
         "entity_category": "config",
         "min": 1, "max": 100, "step": 1, "mode": "box"
-    }
-    client.publish(HA_DIMMING_PERCENT_DISCOVERY_PREFIX, json.dumps(dimming_percent_config), retain=True)
-    print(f"Published dimming percent discovery")
+    }), retain=True)
 
     # Dimming timeout
-    dimming_timeout_config = {
+    client.publish(HA_DIMMING_TIMEOUT_DISCOVERY_PREFIX, json.dumps({
         "name": "HAUI Dimming Timeout",
         "unique_id": f"{HA_NAME}_dimming_timeout",
         "device": {"identifiers": [DEVICE_NAME], "name": HA_NAME, "manufacturer": "Custom", "model": "Display controller", "sw_version": "1.0"},
@@ -310,12 +310,10 @@ def publish_ha_light_discovery():
         "icon": "mdi:timer-sand",
         "entity_category": "config",
         "min": 1, "max": 600, "step": 1, "mode": "box"
-    }
-    client.publish(HA_DIMMING_TIMEOUT_DISCOVERY_PREFIX, json.dumps(dimming_timeout_config), retain=True)
-    print(f"Published dimming timeout discovery")
+    }), retain=True)
 
     # Timeout number
-    timeout_number_config = {
+    client.publish(HA_TIMEOUT_NUMBER_DISCOVERY_PREFIX, json.dumps({
         "name": "HAUI Backlight Timeout",
         "unique_id": f"{HA_NAME}_backlight_timeout",
         "device": {"identifiers": [DEVICE_NAME], "name": HA_NAME, "manufacturer": "Custom", "model": "Display controller", "sw_version": "1.0"},
@@ -325,27 +323,23 @@ def publish_ha_light_discovery():
         "icon": "mdi:timer",
         "entity_category": "config",
         "min": 10, "max": 3600, "step": 1, "mode": "box"
-    }
-    client.publish(HA_TIMEOUT_NUMBER_DISCOVERY_PREFIX, json.dumps(timeout_number_config), retain=True)
-    print(f"Published timeout number discovery")
+    }), retain=True)
 
-    # Undervoltage sensor
-    undervoltage_config = {
-        "name": "HAUI Undervoltage",
+    # Undervoltage event count sensor
+    client.publish(HA_UNDERVOLTAGE_DISCOVERY_PREFIX, json.dumps({
+        "name": "HAUI Undervoltage Events",
         "unique_id": f"{HA_NAME}_undervoltage",
         "device": {"identifiers": [DEVICE_NAME], "name": HA_NAME, "manufacturer": "Custom", "model": "Display controller", "sw_version": "1.0"},
         "state_topic": HA_UNDERVOLTAGE_STATE_TOPIC,
         "icon": "mdi:flash-alert",
         "entity_category": "diagnostic",
-        "device_class": "problem",
-        "payload_on": "1",
-        "payload_off": "0"
-    }
-    client.publish(HA_UNDERVOLTAGE_DISCOVERY_PREFIX, json.dumps(undervoltage_config), retain=True)
-    print(f"Published undervoltage discovery")
+        "device_class": "count",
+        "state_class": "total",
+        "unit_of_measurement": "events"
+    }), retain=True)
 
     # Light entity
-    light_config = {
+    client.publish(HA_LIGHT_DISCOVERY_PREFIX, json.dumps({
         "name": "HAUI Backlight",
         "unique_id": f"{HA_NAME}_backlight",
         "device": {"identifiers": [DEVICE_NAME], "name": HA_NAME, "manufacturer": "Custom", "model": "Display controller", "sw_version": "1.0"},
@@ -357,12 +351,10 @@ def publish_ha_light_discovery():
         "icon": "mdi:monitor",
         "supported_color_modes": ["brightness"],
         "color_mode": "brightness"
-    }
-    client.publish(HA_LIGHT_DISCOVERY_PREFIX, json.dumps(light_config), retain=True)
-    print(f"Published light discovery")
+    }), retain=True)
 
-    # Backlight Level (new dedicated number entity)
-    backlight_level_config = {
+    # Backlight Level
+    client.publish(HA_BACKLIGHT_LEVEL_DISCOVERY_PREFIX, json.dumps({
         "name": "HAUI Backlight Level",
         "unique_id": f"{HA_NAME}_backlight_level",
         "device": {"identifiers": [DEVICE_NAME], "name": HA_NAME, "manufacturer": "Custom", "model": "Display controller", "sw_version": "1.0"},
@@ -371,9 +363,9 @@ def publish_ha_light_discovery():
         "unit_of_measurement": "%",
         "icon": "mdi:brightness-5",
         "min": 0, "max": 100, "step": 1, "mode": "box"
-    }
-    client.publish(HA_BACKLIGHT_LEVEL_DISCOVERY_PREFIX, json.dumps(backlight_level_config), retain=True)
-    print(f"Published backlight level discovery")
+    }), retain=True)
+
+    print("Published all HA discovery configs")
 
 # State publishing
 def publish_ha_light_state():
@@ -384,24 +376,15 @@ def publish_ha_light_state():
         client.publish(HA_TIMEOUT_NUMBER_STATE_TOPIC, str(TIMEOUT_SECONDS), retain=True)
         client.publish(HA_DIMMING_PERCENT_STATE_TOPIC, str(DIMMING_PERCENT), retain=True)
         client.publish(HA_DIMMING_TIMEOUT_STATE_TOPIC, str(DIMMING_TO_OFF_SECONDS), retain=True)
-        undervoltage = get_undervoltage_status()
-        client.publish(HA_UNDERVOLTAGE_STATE_TOPIC, undervoltage, retain=True)
+        
+        undervoltage_str = get_and_update_undervoltage_count()
+        client.publish(HA_UNDERVOLTAGE_STATE_TOPIC, undervoltage_str, retain=True)
+        
         current_level = get_backlight_brightness_in_percent()
         client.publish(HA_BACKLIGHT_LEVEL_STATE_TOPIC, str(current_level), retain=True)
-        print(f"Published states: ... undervoltage={undervoltage}, backlight_level={current_level}%")
     except Exception as e:
         print(f"Error publishing state: {e}")
 
-def get_undervoltage_status():
-    try:
-        result = subprocess.check_output(["vcgencmd", "get_throttled"]).decode("utf-8").strip()
-        hex_val = result.split('=')[1]
-        val = int(hex_val, 16)
-        return "1" if (val & 0x1) else "0"
-    except Exception:
-        return "error"
-
-# Touch monitor thread
 def touch_monitor():
     global current_state, current_brightness, last_brightness, last_activity
     try:
@@ -459,7 +442,7 @@ last_backlight_publish = 0
 
 # === NEW: Undervoltage periodic monitoring ===
 last_undervoltage_check = 0
-last_undervoltage_status = None
+last_undervoltage_status = "0"
 
 try:
     while True:
@@ -518,6 +501,8 @@ try:
                 publish_ha_light_state()
                 dim_start_time = now
                 current_state = "DIMMED"
+                dim_start_time = now
+                publish_ha_light_state()
 
         # Dimmed → off logic (never turn off if timeout is set to max 600)
         if (current_state == "DIMMED" and dim_start_time is not None
