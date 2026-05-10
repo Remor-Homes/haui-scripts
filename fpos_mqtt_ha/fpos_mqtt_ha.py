@@ -321,7 +321,7 @@ def publish_ha_light_discovery():
 
     # Dimming timeout
     dimming_timeout_config = {
-        "name": "HAUI Dimming Timeout",
+        "name": "HAUI Dimming Timeout (Set to 600 to disable)",
         "unique_id": f"{HA_NAME}_dimming_timeout",
         "device": {"identifiers": [DEVICE_NAME], "name": HA_NAME, "manufacturer": "Custom", "model": "Display controller", "sw_version": "1.0"},
         "state_topic": HA_DIMMING_TIMEOUT_STATE_TOPIC,
