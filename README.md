@@ -1,4 +1,12 @@
-# HAUI Scripts
+# HAUI
+
+HAUI is a Home Automation User Interface initially designed for Home assistant community but suitable for any home automation system. It's based on a 7in capacitive touch display and a Raspberry Pi using a modified version of FullPageOS kiosk OS.
+
+<img src="https://haui.remorh.com/haui-07/marketing_002.jpg" alt="HAUI_01" style="width:300px;"/>
+
+Find more information about [HAUI here]([url](https://haui.remorh.com/haui-07/)).
+
+# This Repo: HAUI Scripts
 
 This repository contains :
 1. the python script that does the MQTT interface between HAUI and home assistant.
