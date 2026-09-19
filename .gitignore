@@ -238,3 +238,31 @@ __marimo__/
 .streamlit/secrets.toml
 
 RESET_PROCEDURE.md
+
+# Local AI / coding-assistant files. This repo is replicated onto HAUI
+# kiosk devices used by many people; keep assistant config, rules, and
+# session state off git and on the developer's machine only.
+.grok/
+.agents/
+AGENTS.md
+Agents.md
+AGENT.md
+CLAUDE.md
+Claude.md
+CLAUDE.local.md
+.claude/
+.cursor/
+.cursorignore
+.cursorrules
+.aider*
+.continue/
+.windsurf/
+.gemini/
+.codex/
+.github/copilot-instructions.md
+.github/instructions/
+.copilot/
+.clinerules
+.cline/
+.aiexclude
+.llm/
